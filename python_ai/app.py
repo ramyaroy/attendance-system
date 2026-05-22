@@ -97,6 +97,11 @@ def clean_for_json(value):
         return None
     return value
 
+def mean_absolute_error(actual, predicted):
+    if len(actual) == 0:
+        return None
+    return float(np.mean(np.abs(np.asarray(actual, dtype=float) - np.asarray(predicted, dtype=float))))
+
 @app.route('/analyze', methods=['POST'])
 def analyze():
     try:
@@ -256,28 +261,61 @@ def analyze():
             }
         ]
 
-        # Trend Analysis - same reference logic: Presence is 1 for Office/Remote, else 0.
-        trend_df = refined_df[['Date', 'Name', 'Employee Status']].copy().sort_values(['Date', 'Name'])
-        trend_df['Presence'] = trend_df['Employee Status'].apply(lambda x: 1 if x in ['Office', 'Remote'] else 0)
+        # Trend Analysis: daily aggregation + simple linear model + holdout check to avoid overfitting.
+        trend_source_df = refined_df[['Date', 'Name', 'Employee Status']].copy()
+        trend_source_df['Presence'] = trend_source_df['Employee Status'].apply(lambda x: 1 if x in ['Office', 'Remote'] else 0)
+        trend_df = trend_source_df.groupby('Date').agg(
+            presence=('Presence', 'mean'),
+            sample_size=('Name', 'count')
+        ).reset_index().sort_values('Date')
         trend_df['Day_Number'] = np.arange(len(trend_df))
 
-        if len(trend_df) > 1:
-            X = trend_df[['Day_Number']]
-            y = trend_df['Presence']
-            model = LinearRegression().fit(X, y)
+        trend_model_quality = {
+            'model': 'LinearRegression',
+            'feature': 'Day_Number',
+            'target': 'Daily Presence Rate',
+            'points': int(len(trend_df)),
+            'train_mae': None,
+            'validation_mae': None,
+            'overfitting_detected': False,
+            'reliable': False,
+            'note': 'Need at least 3 daily points for a reliable trend.'
+        }
+
+        if len(trend_df) >= 3:
+            split_index = min(max(2, int(len(trend_df) * 0.8)), len(trend_df) - 1)
+            train_df = trend_df.iloc[:split_index]
+            validation_df = trend_df.iloc[split_index:]
+
+            model = LinearRegression().fit(train_df[['Day_Number']], train_df['presence'])
             slope = model.coef_[0]
-            trend_df['TrendLine'] = model.predict(X)
-            trend = 'Attendance Improving' if slope > 0 else 'Attendance Declining' if slope < 0 else 'Stable Attendance Pattern'
+            trend_df['TrendLine'] = model.predict(trend_df[['Day_Number']])
+
+            train_mae = mean_absolute_error(train_df['presence'], model.predict(train_df[['Day_Number']]))
+            validation_mae = mean_absolute_error(validation_df['presence'], model.predict(validation_df[['Day_Number']]))
+            overfitting_detected = validation_mae is not None and validation_mae > max((train_mae or 0) * 2.5, 0.2)
+
+            trend_model_quality.update({
+                'train_mae': round(train_mae, 4) if train_mae is not None else None,
+                'validation_mae': round(validation_mae, 4) if validation_mae is not None else None,
+                'overfitting_detected': bool(overfitting_detected),
+                'reliable': not overfitting_detected,
+                'note': 'Trend passed holdout validation.' if not overfitting_detected else 'Validation error is high; treat trend as unstable.'
+            })
+
+            if overfitting_detected:
+                trend = 'Stable Attendance Pattern'
+            else:
+                trend = 'Attendance Improving' if slope > 0 else 'Attendance Declining' if slope < 0 else 'Stable Attendance Pattern'
         else:
             slope = 0
-            trend_df['TrendLine'] = trend_df['Presence'] if len(trend_df) else []
+            trend_df['TrendLine'] = trend_df['presence'] if len(trend_df) else []
             trend = 'Stable Attendance Pattern'
 
         trend_df['Date'] = trend_df['Date'].dt.strftime('%Y-%m-%d')
         trend_points = trend_df.rename(columns={
-            'Presence': 'presence',
             'TrendLine': 'trend_line'
-        })[['Date', 'Name', 'presence', 'trend_line']].to_dict(orient='records')
+        })[['Date', 'presence', 'trend_line', 'sample_size']].to_dict(orient='records')
 
         absentee_alerts = refined_df[refined_df['Employee Status'] == 'Absent'][['Name', 'Date']].copy()
         absentee_alerts['Date'] = absentee_alerts['Date'].dt.strftime('%Y-%m-%d')
@@ -315,6 +353,7 @@ def analyze():
             'login_logout_comparison': login_logout_comparison,
             'trend_points': trend_points,
             'trend_slope': float(slope),
+            'trend_model_quality': trend_model_quality,
             'high_resignation_risk': high_resignation_risk,
             'alerts': absentee_alerts,
             'total_records': int(len(refined_df)),
@@ -327,6 +366,7 @@ def analyze():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/', methods=['GET'])
+
 def home():
     return jsonify({'message': 'Attendance AI Server Running'})
 
