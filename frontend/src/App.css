@@ -306,12 +306,20 @@ button:disabled {
 }
 
 .chart-grid {
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: 1fr;
 }
 
 .chart-card {
   min-height: 360px;
   margin-bottom: 0;
+}
+
+.chart-card .recharts-responsive-container {
+  min-height: 280px;
+}
+
+.trend-chart-card .recharts-responsive-container {
+  min-height: 360px;
 }
 
 .metric-card {
@@ -347,6 +355,35 @@ button:disabled {
   font-size: 1.1rem;
   font-weight: 700;
   margin-bottom: 8px;
+}
+
+.model-quality-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 10px 0 14px;
+}
+
+.model-quality-grid span,
+.model-ok,
+.model-warning {
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.model-quality-grid span {
+  background: #f7f9fd;
+  color: var(--muted);
+}
+
+.model-ok {
+  background: rgba(42, 157, 143, 0.12);
+  color: #146b60;
+}
+
+.model-warning {
+  background: rgba(214, 40, 40, 0.12);
+  color: #9b1d1d;
 }
 
 @media (max-width: 640px) {

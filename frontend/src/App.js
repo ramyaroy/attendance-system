@@ -21,7 +21,6 @@ const API_BASE = 'http://localhost:5001'
 
 export default function App() {
   const [accessToken, setAccessToken] = useState('')
-  const [refreshToken, setRefreshToken] = useState('')
   const [records, setRecords] = useState([])
   const [riskCounts, setRiskCounts] = useState({})
   const [highRisk, setHighRisk] = useState([])
@@ -33,6 +32,7 @@ export default function App() {
     mostHolidaysTaken: [],
     trend: '',
     trendPoints: [],
+    trendModelQuality: {},
     overtimePoints: [],
     loginLogoutComparison: [],
     statusCounts: {}
@@ -44,31 +44,56 @@ export default function App() {
   const [isDragActive, setIsDragActive] = useState(false)
   const [uploadDecisionPending, setUploadDecisionPending] = useState(false)
   const fileInputRef = useRef(null)
+  const refreshTimerRef = useRef(null)
   const isAuthenticated = Boolean(accessToken)
 
-  useEffect(() => {
-    const storedAccessToken = localStorage.getItem('accessToken')
-    const storedRefreshToken = localStorage.getItem('refreshToken')
+  const saveTokens = useCallback((newAccessToken) => {
+    setAccessToken(newAccessToken)
+  }, [])
 
-    if (storedAccessToken && storedRefreshToken) {
-      setAccessToken(storedAccessToken)
-      setRefreshToken(storedRefreshToken)
+  const clearAuth = useCallback(() => {
+    setAccessToken('')
+    if (refreshTimerRef.current) {
+      clearTimeout(refreshTimerRef.current)
+      refreshTimerRef.current = null
     }
   }, [])
 
-  const saveTokens = (newAccessToken, newRefreshToken) => {
-    setAccessToken(newAccessToken)
-    setRefreshToken(newRefreshToken)
-    localStorage.setItem('accessToken', newAccessToken)
-    localStorage.setItem('refreshToken', newRefreshToken)
-  }
+  const refreshAccessToken = useCallback(async () => {
+    const response = await axios.post(`${API_BASE}/refresh`, {}, { withCredentials: true })
+    saveTokens(response.data.accessToken)
+    return response.data.accessToken
+  }, [saveTokens])
 
-  const clearAuth = () => {
-    setAccessToken('')
-    setRefreshToken('')
-    localStorage.removeItem('accessToken')
-    localStorage.removeItem('refreshToken')
-  }
+  const scheduleTokenRefresh = useCallback(() => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
+
+    refreshTimerRef.current = setTimeout(async () => {
+      try {
+        await refreshAccessToken()
+        scheduleTokenRefresh()
+      } catch (error) {
+        clearAuth()
+      }
+    }, 90 * 1000)
+  }, [clearAuth, refreshAccessToken])
+
+  useEffect(() => {
+    const restoreSession = async () => {
+      try {
+        await refreshAccessToken()
+        scheduleTokenRefresh()
+      } catch (error) {
+        clearAuth()
+      }
+    }
+
+    restoreSession()
+
+    return () => {
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
+    }
+  }, [clearAuth, refreshAccessToken, scheduleTokenRefresh])
 
   const resetDashboard = () => {
     setRecords([])
@@ -82,6 +107,7 @@ export default function App() {
       mostHolidaysTaken: [],
       trend: '',
       trendPoints: [],
+      trendModelQuality: {},
       overtimePoints: [],
       loginLogoutComparison: [],
       statusCounts: {}
@@ -93,7 +119,7 @@ export default function App() {
 
   const handleLogout = async () => {
     try {
-      await axios.post(`${API_BASE}/logout`, { refreshToken })
+      await axios.post(`${API_BASE}/logout`, {}, { withCredentials: true })
     } catch (e) {
       // Logout should always return the user to the login screen locally.
     }
@@ -121,12 +147,23 @@ export default function App() {
       formData.append('file', file)
 
       try {
-        const response = await axios.post(`${API_BASE}/upload`, formData, {
+        let token = accessToken
+        const sendUpload = () => axios.post(`${API_BASE}/upload`, formData, {
           headers: {
-            Authorization: `Bearer ${accessToken}`,
+            Authorization: `Bearer ${token}`,
             'Content-Type': 'multipart/form-data'
           }
         })
+
+        let response
+        try {
+          response = await sendUpload()
+        } catch (uploadError) {
+          if (uploadError.response?.status !== 401) throw uploadError
+          token = await refreshAccessToken()
+          scheduleTokenRefresh()
+          response = await sendUpload()
+        }
 
         const analyticsData = response.data?.data || {}
         setRecords(analyticsData.records || [])
@@ -140,6 +177,7 @@ export default function App() {
           mostHolidaysTaken: analyticsData.most_holidays_taken || [],
           trend: analyticsData.trend || '',
           trendPoints: analyticsData.trend_points || [],
+          trendModelQuality: analyticsData.trend_model_quality || {},
           overtimePoints: analyticsData.overtime_points || [],
           loginLogoutComparison: analyticsData.login_logout_comparison || [],
           statusCounts: analyticsData.status_counts || {}
@@ -154,7 +192,7 @@ export default function App() {
         setLoading(false)
       }
     },
-    [accessToken]
+    [accessToken, refreshAccessToken, scheduleTokenRefresh]
   )
 
   const handleFileInputChange = (event) => {
@@ -190,12 +228,17 @@ export default function App() {
       setIsSubmitting(true)
 
       try {
-        const response = await axios.post(`${API_BASE}/login`, {
-          email: email.trim(),
-          password
-        })
+        const response = await axios.post(
+          `${API_BASE}/login`,
+          {
+            email: email.trim(),
+            password
+          },
+          { withCredentials: true }
+        )
 
-        saveTokens(response.data.accessToken, response.data.refreshToken)
+        saveTokens(response.data.accessToken)
+        scheduleTokenRefresh()
         navigate('/')
       } catch (loginError) {
         setPassword('')
@@ -336,13 +379,11 @@ export default function App() {
       )}
 
       {analyticsDetails.trend && (
-        <section className="panel">
-          <h2>Trend Intelligence</h2>
-          <p className="trend-text">{analyticsDetails.trend}</p>
-          {analyticsDetails.trendPoints.length > 0 && (
-            <p className="muted">{analyticsDetails.trendPoints.length} day trend calculated with linear regression.</p>
-          )}
-        </section>
+        <TrendIntelligenceChart
+          trend={analyticsDetails.trend}
+          data={analyticsDetails.trendPoints}
+          quality={analyticsDetails.trendModelQuality}
+        />
       )}
 
       <section className="chart-grid">
@@ -486,6 +527,43 @@ export default function App() {
         </ResponsiveContainer>
       ) : (
         <p className="muted">Upload data to view overtime trends.</p>
+      )}
+    </section>
+  )
+
+  const TrendIntelligenceChart = ({ trend, data, quality }) => (
+    <section className="panel chart-card trend-chart-card">
+      <h2>Trend Intelligence</h2>
+      <p className="trend-text">{trend}</p>
+      {quality?.note && (
+        <p className={quality.overfitting_detected ? 'model-warning' : 'model-ok'}>
+          {quality.note}
+        </p>
+      )}
+      {quality?.points ? (
+        <div className="model-quality-grid">
+          <span>Points: <strong>{quality.points}</strong></span>
+          <span>Train MAE: <strong>{quality.train_mae ?? 'N/A'}</strong></span>
+          <span>Validation MAE: <strong>{quality.validation_mae ?? 'N/A'}</strong></span>
+        </div>
+      ) : null}
+      {data.length ? (
+        <>
+          <p className="muted">{data.length} attendance points calculated with linear regression.</p>
+          <ResponsiveContainer width="100%" height={360}>
+            <LineChart data={data} margin={{ top: 16, right: 24, left: 0, bottom: 16 }}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="Date" />
+              <YAxis domain={[0, 1]} ticks={[0, 1]} />
+              <Tooltip />
+              <Legend />
+              <Line type="monotone" dataKey="presence" name="Actual Presence" stroke="#264de4" strokeWidth={3} dot={{ r: 4 }} />
+              <Line type="monotone" dataKey="trend_line" name="Trend Line" stroke="#d62828" strokeWidth={3} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </>
+      ) : (
+        <p className="muted">Upload data to view attendance trend intelligence.</p>
       )}
     </section>
   )
